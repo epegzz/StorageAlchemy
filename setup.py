@@ -4,7 +4,7 @@ from distutils.core import setup
 
 setup(
     name='StorageAlchemy',
-    version='0.1.0',
+    version='0.1.1',
     description='Feels like storing file contents in the database, but actually stores them wherever you like to. Combines the power of transactional database queries with the freedom of storing data using whatever external API you like.',
     url='http://github.com/epegzz/StorageAlchemy',
 

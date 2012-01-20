@@ -5,7 +5,7 @@ import shutil
 from . import BaseTestCase, session, Base
 
 from storagealchemy import Storage, Storable
-from storagealchemy.handler import FilesystemStorageHandler
+from storagealchemy.handler import FilesystemHandler
 
 import os
 import logging
@@ -56,7 +56,7 @@ class StorageTest(BaseTestCase):
         uid = uid or self.test_uid
         gid = gid or self.test_gid
 
-        filesystem_handler = FilesystemStorageHandler\
+        filesystem_handler = FilesystemHandler\
             ( path
             , uid = uid
             , gid = gid

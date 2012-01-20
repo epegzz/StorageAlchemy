@@ -231,11 +231,11 @@ class Storage():
 
 class Storable(object):
 
-    storage_uri         = sa.Column(mysql.VARCHAR(length=256, ascii=True))
-    content_length      = sa.Column(mysql.BIGINT(20, unsigned=True))
-    content_checksum    = sa.Column(mysql.TEXT(length=32, ascii=True))
-    creation_time       = sa.Column(mysql.DATETIME(), nullable=False, default=sa.func.now())
-    modification_time   = sa.Column(mysql.DATETIME(), nullable=False, default=sa.func.now())
+    storage_uri         = sa.Column(sa.String(length=255))
+    content_length      = sa.Column(sa.BigInteger(20, unsigned=True))
+    content_checksum    = sa.Column(sa.Text(length=32))
+    creation_time       = sa.Column(sa.DateTime(), nullable=False, default=sa.func.now())
+    modification_time   = sa.Column(sa.DateTime(), nullable=False, default=sa.func.now())
 
     #_parent_file_id = sa.Column('parent_file_id', mysql.BIGINT(20, unsigned=True))
     #on_parent_modify = sa.Column(mysql.ENUM(u'delete'))
