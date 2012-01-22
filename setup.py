@@ -4,7 +4,7 @@ from distutils.core import setup
 
 setup(
     name='StorageAlchemy',
-    version='0.1.1',
+    version='0.2',
     description='Feels like storing file contents in the database, but actually stores them wherever you like to. Combines the power of transactional database queries with the freedom of storing data using whatever external API you like.',
     url='http://github.com/epegzz/StorageAlchemy',
 
@@ -14,7 +14,10 @@ setup(
 
     packages=['storagealchemy'],
 
-    install_requires=['sqlalchemy'],
+    install_requires=\
+        [ 'sqlalchemy'
+        , 'sqlahelper'
+        ],
 
     classifiers=[
        'Development Status :: 5 - Production/Stable',

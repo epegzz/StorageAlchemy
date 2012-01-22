@@ -5,7 +5,8 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.ext.declarative import declarative_base
 
 meta = MetaData()
-engine = create_engine('mysql://test:test@localhost:3306/test?charset=utf8&use_unicode=0')
+#engine = create_engine('mysql://test:test@localhost:3306/test?charset=utf8&use_unicode=0')
+engine = create_engine('sqlite:///:memory:', echo=True)
 Base = declarative_base(metadata = meta)
 Base.metadata.bind = engine
 

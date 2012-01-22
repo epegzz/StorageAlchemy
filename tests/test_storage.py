@@ -166,3 +166,24 @@ class StorageTest(BaseTestCase):
         #}}}
 
 
+
+    def test_setting_data_before_uri_works(self):
+        #{{{
+        session.commit()
+        self.create_test_storage()
+
+        file_storage_uri = 'test://test_setting_data_before_uri_works.txt'
+        data = 'some data'
+
+        file = TestFile()
+        file.data = data
+        file.storage_uri = file_storage_uri
+
+        session.commit()
+
+        self.assertEqual(self._get_from_database(storage_uri=file_storage_uri), file)
+        self.assertEqual(self._get_from_filesystem(storage_uri=file_storage_uri), data)
+        #}}}
+
+
+

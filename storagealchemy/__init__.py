@@ -4,39 +4,50 @@ import logging
 import sqlalchemy as sa
 import hashlib
 
-from sqlalchemy.orm import mapper
-from sqlalchemy.dialects import mysql as mysql
-from sqlalchemy.ext.declarative import declared_attr
-
+#from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.schema import Index
+from sqlalchemy.orm import mapper, object_session
+from sqlalchemy.orm.util import has_identity
+
+import sqlahelper
 
 from .exception import StorageError, NoSuchFile
-
 from . import handler
+
+Base = sqlahelper.get_base()
+Session = sqlahelper.get_session()
+
 
 log = logging.getLogger(__name__)
 
-__all__ = ['Storage', 'Storable']
+__all__ = ['Storage', 'Storable', 'StorableClass', 'StorableFile', 'handler']
 
 
 class Storage():
 
-    def __init__\
-        ( self
-        , db_session
-        ):
+    def __init__(self):
         self._storage_dict = dict()
-        self._stash_dict = dict()
-        self._locks = dict()
+        self._tasks = dict()
+        self._committed = list()
+        self._uriless_stash_dict = dict()
+        Storable._storage = self
 
-        sa.event.listen(db_session, "after_commit", self._after_commit_callback())
-        sa.event.listen(db_session, "after_soft_rollback", self._after_rollback_callback())
+        def after_bulk_delete(session, query, query_context, result):
+            # @TODO: implement later
+            # >>> query_context.statement.execute().fetchall()
+            # [(3L, None), (5L, None)]
+            # >>> Session.x_query_context.statement.froms
+            # [Table('TestFile', MetaData(bind=Engine(mysql://...)), Column('id', BigInteger(), table=<TestFile>, primary_key=True, nullable=False), Column('foo', Text(length=32), table=<TestFile>), schema=None)]
+            pass
 
-        # Whenever an object is created that inherits from Storaable,
-        # set object._storage to self, so that read/write methods from
-        # StorageFile will work.
-        def on_storage_file_init(target, *args, **kwargs):
-            target._storage = self
+        sa.event.listen(Session, "after_bulk_delete", after_bulk_delete)
+        sa.event.listen(Session, "before_flush", self._before_flush_callback())
+        sa.event.listen(Session, "before_commit", self._before_commit_callback())
+        sa.event.listen(Session, "after_commit", self._after_commit_callback())
+        sa.event.listen(Session, "after_soft_rollback", self._after_rollback_callback())
+
+        def on_storage_file_init(bind, *args, **kwargs):
+            bind.on_create_new_instance()
         @sa.event.listens_for(mapper, "mapper_configured")
         def _listen_init(m, cls_):
             if issubclass(cls_, Storable):
@@ -51,153 +62,141 @@ class Storage():
             , delete = delete
             )
 
-    def read(self, file):
+    def read(self, storable_file):
         #{{{
-        """Returns file contents.
+        """Returns storable_file contents.
 
         """
-        if file.storage_uri in self._stash_dict:
-            return self._stash_dict[file.storage_uri]['data']
-        storage, path = self._get_storage(file.storage_uri, 'r')
+        if storable_file not in Session:
+            Session.add(storable_file)
         try:
-            return storage.read(path)
-        except NoSuchFile:
-            return None
+            storage_uri = storable_file.storage_uri or ''
+            return self._tasks[storable_file][storage_uri]['write']['data']
+        except KeyError:
+            if storable_file.storage_uri is None:
+                return None
+            try:
+                storage, path = self._get_storage(storable_file.storage_uri, 'r')
+                return storage.read(path)
+            except NoSuchFile:
+                return None
         #}}}
 
 
-    def write(self, file, data):
+    def write(self, storable_file, data):
         #{{{
-        """Writes content data to file.
+        """Writes content data to storable_file.
 
         """
-        # Make sure that no other process tries to write to this file.
-        # If file is currently locked by another process, this process
-        # will wait until the fill becomes unlocked again and than lock it.
-        self.lock(file)
-
+        if storable_file not in Session:
+            Session.add(storable_file)
         if data is None:
-            if file.content_checksum == None:
+            if storable_file.content_checksum == None:
                 return  # nothing changed
-            file.content_length = None
-            file.content_checksum = None
-            file.modification_time = sa.func.now()
-            self.delete_on_commit(file) # no data to store
+            storable_file.content_length = None
+            storable_file.content_checksum = None
+            storable_file.modification_time = sa.func.now()
+            self.delete_on_commit(storable_file) # no data to store
         else:
             new_checksum = str(hashlib.md5(data).hexdigest())
-            if file.content_checksum == new_checksum:
+            if storable_file.content_checksum == new_checksum:
                 return # nothing changed
-            file.content_length = len(data)
-            file.content_checksum = new_checksum
-            file.modification_time = sa.func.now()
-            self.write_on_commit(file, data)
+            storable_file.content_length = len(data)
+            storable_file.content_checksum = new_checksum
+            storable_file.modification_time = sa.func.now()
+            self.write_on_commit(storable_file, data)
         #}}}
 
 
 
-    def lock(self, file):
-        """Lock a file to protect it from being overwritten by another process.
-
-        """
-        storage, path = self._get_storage(file.storage_uri, 'w')
-        lock = storage.get_lock(path)
-        if not lock \
-        or not file.storage_uri in self._locks \
-        or not self._locks[file.storage_uri] == str(lock):
-            # wait until we can gain lock again
-            lock = storage.lock(path)
-            self._locks[file.storage_uri] = str(lock)
-        return lock
-
-
-    def unlock(self, file):
-        """Unlock a file.
-
-        """
-        if file.storage_uri in self._locks:
-            storage, path = self._get_storage(file.storage_uri, 'w')
-            storage.unlock(path, lock=self._locks[file.storage_uri])
-            del(self._locks[file.storage_uri])
-
-
-    def is_locked(self, file):
-        """Returns whether a file is locked (by any process including the current one) or not.
-
-        """
-        storage, path = self._get_storage(file.storage_uri, 'w')
-        return storage.is_locked(path)
-
-    def owns_lock(self, file):
-        """Returns whether the current process owns a lock on the file.
-
-        """
-        storage, path = self._get_storage(file.storage_uri, 'w')
-        return file.storage_uri in self._locks and str(storage.get_lock(path)) == self._locks[file.uri]
-
-
-    def _unlock_all(self):
-        for storage_uri in self._locks:
-            storage, path = self._get_storage(storage_uri, 'w')
-            storage.unlock(path, self._locks[storage_uri])
-        self._locks = dict()
-
-
-    def write_on_commit(self, file, data):#{{{
-        storage, path = self._get_storage(file.storage_uri, 'w')
-        def write_later(session):
-            if file in session \
-            and not file in session.deleted:
-                storage.write(path, data)
-        self._stash_dict[file.storage_uri] = dict\
+    def write_on_commit(self, storable_file, data):#{{{
+        def write_later(session, _uri):
+            storage, path = self._get_storage(_uri, 'w')
+            storage.write(path, data)
+        task = dict\
             ( callback = write_later
             , data = data
-            , file = file
-            , action = 'write'
             )
+        storage_uri = storable_file.storage_uri or ''
+        self._add_task(storable_file, storage_uri, 'write', task)
         #}}}
 
 
-    def delete_on_commit(self, file):#{{{
-        storage, path = self._get_storage(file.storage_uri, 'w')
-        def delete_later(session):
+    def delete_on_commit(self, storable_file):#{{{
+        def delete_later(session, _uri):
+            storage, path = self._get_storage(_uri, 'w')
             try:
                 storage.delete(path)
             except NoSuchFile:
                 pass
-        self._stash_dict[file.storage_uri] = dict\
+        task = dict\
             ( callback = delete_later
-            , data = None
-            , file = file
-            , action = 'delete'
             )
+        storage_uri = storable_file.storage_uri or ''
+        self._add_task(storable_file, storage_uri, 'delete', task)
+        self._drop_tasks(storable_file, storage_uri, 'write')
+        #}}}
+
+
+
+    def _before_flush_callback(self):
+        def _before_flush(session, flush_context, instances):#{{{
+            print "before flush callback"
+            # Make sure that _storable_file of all storables in session
+            # is in session as well.
+            for obj in session:
+                if isinstance(obj, Storable):
+                    if obj._storable_file not in session:
+                        session.add(obj._storable_file)
+            # Make sure that if _storable_file.bind is not in session
+            # _storable_file is not in session either.
+            for storable_file in self._tasks:
+                if storable_file.bind not in session\
+                and storable_file in session:
+                    session.expunge(storable_file)
+            # Make sure that if _storable_file.bind gets deleted,
+            # _storable_file gets deleted as well.
+            for obj in session.deleted:
+                if isinstance(obj, Storable):
+                    # Delete all that got deleted from database
+                    # after next commit.
+                    self.delete_on_commit(obj._storable_file)
+                    Session.delete(obj._storable_file)
+        return _before_flush
         #}}}
 
 
     def _before_commit_callback(self):
         def _before_commit(session):#{{{
-            for file in session.deleted:
-                # Delete all that got deleted from database
-                # after next commit.
-                self.delete_on_commit(file)
+            print "before commit callback"
+            # perform write/delete action
+            for storable_file in self._tasks:
+                if storable_file in session:
+                    self._committed.append(storable_file)
         return _before_commit
         #}}}
 
-
     def _after_commit_callback(self):
         def _after_commit(session):#{{{
-            for key in self._stash_dict:
-                # perform write/delete action
-                self._stash_dict[key]['callback'](session)
-            self._stash_dict = dict()
-            self._unlock_all()
+            print "after commit callback"
+            # perform write/delete action
+            for storable_file in self._tasks:
+                if storable_file in self._committed:
+                    for storage_uri in self._tasks[storable_file]:
+                        tasks = self._tasks[storable_file][storage_uri]
+                        if 'delete' in tasks:
+                            tasks['delete']['callback'](session, storage_uri)
+                        elif 'write' in tasks:
+                            tasks['write']['callback'](session, storage_uri)
+                    self._committed.remove(storable_file)
+                    self._drop_tasks(storable_file)
         return _after_commit
         #}}}
 
 
     def _after_rollback_callback(self):
         def _after_rollback(session, previous_transaction):#{{{
-            self._stash_dict = dict()
-            self._unlock_all()
+            self._tasks = dict()
         return _after_rollback
         #}}}
 
@@ -226,42 +225,178 @@ class Storage():
         #}}}
 
 
+    def _on_storage_uri_change(self, storable_file, new_uri):
+
+        if new_uri is None:
+            raise StorageError('You cannot set the uri to None.')
+
+        if storable_file not in Session:
+            Session.add(storable_file)
+
+        old_uri = storable_file.storage_uri
+
+        if old_uri is None:
+            # If we had no url before, now we do.
+            self._change_task_storage_uri(storable_file, '', new_uri)
+            storable_file.storage_uri = new_uri
+            return
+
+
+        if not has_identity(storable_file):
+            # forget about the prior uri and just replace it
+            # with the new one.
+            self._change_task_storage_uri(storable_file, old_uri, new_uri)
+            storable_file.storage_uri = new_uri
+            return
+
+
+        if has_identity(storable_file):
+            data = storable_file.data
+            storable_file.data = None # delete data from old uri
+            storable_file.storage_uri = new_uri
+            storable_file.data = data # write data to new uri
+            return
 
 
 
-class Storable(object):
+    def _add_task(self, storable_file, storage_uri, action, task):
+        if storable_file not in self._tasks:
+            self._tasks[storable_file] = dict()
+        if storage_uri not in self._tasks[storable_file]:
+            self._tasks[storable_file][storage_uri] = dict()
+        self._tasks[storable_file][storage_uri][action] = task
 
-    storage_uri         = sa.Column(sa.String(length=255))
+
+    def _drop_tasks(self, storable_file=None, storage_uri=None, action=None):
+        try:
+            if action is not None and storage_uri is not None and storable_file is not None:
+                del(self._tasks[storable_file][storage_uri][action])
+            elif storage_uri is not None and storable_file is not None:
+                del(self._tasks[storable_file][storage_uri])
+            elif storable_file is not None:
+                del(self._tasks[storable_file])
+        except KeyError:
+            pass
+
+
+    def _change_task_storage_uri(self, storable_file, old_uri, new_uri):
+        if storable_file not in self._tasks:
+            return
+        if old_uri not in self._tasks[storable_file]:
+            return
+        for action in self._tasks[storable_file][old_uri]:
+            self._add_task(storable_file, new_uri, action, self._tasks[storable_file][old_uri][action])
+        self._drop_tasks(storable_file, old_uri)
+
+
+
+    def _get_db_state(self, obj):
+        # Transient - an instance that’s not in a session, and is not saved
+        # to the database; i.e. it has no database identity. The only relationship
+        # such an object has to the ORM is that its class has a mapper() associated with it.
+        if object_session(obj) is None and not has_identity(obj):
+            return 'transient'
+
+        # Pending - when you add() a transient instance, it becomes pending. It still
+        # wasn’t actually flushed to the database yet, but it will be when the next flush occurs.
+        if object_session(obj) is not None and not has_identity(obj):
+            return 'pending'
+
+        # Persistent - An instance which is present in the session and has a record in
+        # the database. You get persistent instances by either flushing so that the pending
+        # instances become persistent, or by querying the database for existing instances
+        # (or moving persistent instances from other sessions into your local session).
+        if object_session(obj) is not None and has_identity(obj):
+            return 'persistent'
+
+        # Detached - an instance which has a record in the database, but is not in any
+        # session. There’s nothing wrong with this, and you can use objects normally
+        # when they’re detached, except they will not be able to issue any SQL in order
+        # to load collections or attributes which are not yet loaded, or were marked as “expired”.
+        if object_session(obj) is None and has_identity(obj):
+            return 'detached'
+
+
+
+
+class StorableClass(Base):
+    __tablename__ = 'StorableClass'
+    id                = sa.Column(sa.BigInteger(20, unsigned=True), primary_key=True, autoincrement=True)
+    tablename         = sa.Column(sa.String(length=255), index=True, unique=True )
+
+
+class StorableFile(Base):
+    __tablename__ = 'StorableFile'
+    __table_args__ = (Index('ix_StorableFile_bind', "bind_class_id", "bind_id"), )
+
+    id                  = sa.Column(sa.BigInteger(20, unsigned=True), primary_key=True, autoincrement=True)
+
+    bind_class_id       = sa.Column(sa.BigInteger(20, unsigned=True), sa.ForeignKey('StorableClass.id', onupdate='CASCADE', ondelete='SET NULL'))
+    bind_id             = sa.Column(sa.BigInteger(20, unsigned=True))
+
+    storage_uri         = sa.Column(sa.String(length=255), index=True, unique=True )
     content_length      = sa.Column(sa.BigInteger(20, unsigned=True))
     content_checksum    = sa.Column(sa.Text(length=32))
     creation_time       = sa.Column(sa.DateTime(), nullable=False, default=sa.func.now())
     modification_time   = sa.Column(sa.DateTime(), nullable=False, default=sa.func.now())
 
-    #_parent_file_id = sa.Column('parent_file_id', mysql.BIGINT(20, unsigned=True))
-    #on_parent_modify = sa.Column(mysql.ENUM(u'delete'))
-    #on_parent_delete = sa.Column(mysql.ENUM(u'delete'))
-    #@declared_attr
-    #def parent_file(cls):
-        #return relationship\
-            #( cls
-            #, remote_side = '[%s.id]' % cls.__tablename__
-            #, uselist = False
-            #, backref = backref('child_files', single_parent=True)
-            #)
 
-    @declared_attr
-    def __table_args__(cls):
-        args = [Index('ix_%s_storage_uri' % cls.__tablename__, 'storage_uri', unique=True)]
-        if hasattr(cls, '__add_table_args__'):
-            args.append(cls.__add_table_args__)
-        return tuple(args)
+
+class Storable(object):
+
+    def on_create_new_instance(self):
+        print 'on_create_new_instance'
+        self._set_storable_class()
+        self._storable_file = StorableFile()
+        self._storable_file.bind_class_id = self._storable_class.id
+        self._storable_file.bind = self
+
+    @sa.orm.reconstructor
+    def on_load_from_session(self):
+        print 'on_load_from_session'
+        self._set_storable_class()
+        try:
+            self._storable_file = Session\
+                .query(StorableFile)\
+                .filter_by(bind_class_id = self._storable_class.id)\
+                .filter_by(bind_id = self.id)\
+                .one()
+        except sa.orm.exc.NoResultFound:
+            self._storable_file = StorableFile()
+            self._storable_file.bind_class_id = self._storable_class.id
+
+
+    def _set_storable_class(self):
+        if not hasattr(self.__class__, '__storable_class__'):
+            try:
+                self.__class__.__storable_class__ = Session\
+                    .query(StorableClass)\
+                    .filter_by(tablename = self.__tablename__)\
+                    .one()
+                print 'loaded storable class from database: %s' % self.__tablename__
+            except sa.orm.exc.NoResultFound:
+                print 'created new storable class: %s' % self.__tablename__
+                storable_class = StorableClass()
+                storable_class.tablename = self.__tablename__
+                Session.add(storable_class)
+                Session.flush()
+                self.__class__.__storable_class__ = storable_class
+        self._storable_class = self.__class__.__storable_class__
 
 
     def _get_file_contents(self):
-        self._storage.read(self)
+        return self._storage.read(self._storable_file)
     def _set_file_contents(self, data):
-        self._storage.write(self, data)
+        self._storage.write(self._storable_file, data)
     data = property(_get_file_contents, _set_file_contents)
+
+
+    def _get_storage_uri(self):
+        return self._storable_file.storage_uri
+    def _set_storage_uri(self, uri):
+        self._storage._on_storage_uri_change(self._storable_file, uri)
+    storage_uri = property(_get_storage_uri, _set_storage_uri)
+
 
 
 
