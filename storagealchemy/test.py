@@ -1,4 +1,4 @@
-from . import Storage, Storable
+from . import Storage
 from .handler import FilesystemHandler
 
 import sqlalchemy as sa
@@ -7,7 +7,7 @@ import sqlahelper
 Base = sqlahelper.get_base()
 
 
-class TestFile(Storable, Base):
+class TestFile(Base):
     __tablename__ = 'TestFile'
 
     id     = sa.Column(sa.BigInteger(20, unsigned=True), primary_key=True, autoincrement=True)
@@ -27,7 +27,6 @@ class TestStorage():
         , path=None
         , read=True
         , write=True
-        , delete=True
         , uid = None
         , gid = None
         , max_lock_time = 2
@@ -45,5 +44,7 @@ class TestStorage():
             )
 
         self.storage = Storage()
-        self.storage.add_handler('test://', filesystem_handler)
+        self.storage.add_handler('test', filesystem_handler)
         #}}}
+
+

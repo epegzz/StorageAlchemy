@@ -1,11 +1,10 @@
-from sqlalchemy.orm.exc import NoResultFound
-
 import shutil
 
 from . import BaseTestCase
 
-from storagealchemy import StorableFile, StorableClass
-from storagealchemy.test import TestStorage, TestFile
+from storagealchemy import Storage
+from storagealchemy.handler import FilesystemHandler
+from storagealchemy.test import TestFile
 
 import sqlahelper
 import transaction
@@ -23,7 +22,6 @@ storage = None
 
 
 
-
 class StorageTest(BaseTestCase):
 
     test_storage_path = '/tmp/storage_test'
@@ -35,123 +33,63 @@ class StorageTest(BaseTestCase):
         super(StorageTest, self).setUp()
         shutil.rmtree(self.test_storage_path)
         os.mkdir(self.test_storage_path)
-        global storage
-        if storage is None:
-            storage = TestStorage()
         TestFile.__table__.create(checkfirst=True)
-        Session.query(StorableClass).delete()
-        Session.query(StorableFile).delete()
         Session.query(TestFile).delete()
         transaction.commit()
+        global storage
+        storage = Storage()
+        storage.add_handler('test', FilesystemHandler(self.test_storage_path, uid=self.test_uid, gid=self.test_gid))
         #}}}
 
-    def _get_from_filesystem(self, storage_uri):#{{{
-        if not storage_uri.startswith('test://'):
-            raise Exception('unknown storage_uri %s' % storage_uri)
-        path = os.path.join(self.test_storage_path, storage_uri.replace('test://', ''))
+    def _get_from_filesystem(self, uri):#{{{
+        path = os.path.join(self.test_storage_path, uri.replace('test://', ''))
         if not os.path.isfile(path):
             return None
         fh = open(path, 'r')
         return fh.read()#}}}
 
-    def _get_from_database(self, storage_uri):#{{{
-        try:
-            return Session\
-                .query(StorableFile)\
-                .filter_by(storage_uri=storage_uri)\
-                .one()
-        except NoResultFound:
-            return None#}}}
 
 
+    def test_committing_session_stores_file(self):
 
+        uri = 'test://test_committing_session_stores_file.txt'
+        data = 'test data'
 
-    def test_adding_file_to_session_makes_it_persistant(self):
-        #{{{
-
-        file_storage_uri = 'test://test_adding_file_to_session_makes_it_persistant.txt'
-        data = 'some data'
-
-        file = TestFile()
-        file.storage_uri = file_storage_uri
-        file.data = data
-
-        self.assertIsNone(self._get_from_database(storage_uri=file_storage_uri))
-        self.assertIsNone(self._get_from_filesystem(storage_uri=file_storage_uri))
-
-        Session.add(file)
-
+        storage.write(uri, data)
         transaction.commit()
 
-        Session.add(file._storable_file)
-
-        self.assertEqual(self._get_from_database(storage_uri=file_storage_uri), file._storable_file)
-        self.assertEqual(self._get_from_filesystem(storage_uri=file_storage_uri), data)
-        self.assertTrue(False)
-        #}}}
+        self.assertEqual(storage.read(uri), data)
+        self.assertEqual(self._get_from_filesystem(uri), data)
 
 
-    def test_file_is_not_persistent_if_not_added_to_session(self):
-        #{{{
+    def test_rolling_back_session_does_not_store_file(self):
 
-        file_storage_uri = 'test://test_file_is_not_persistent_if_not_added_to_session.txt'
-        data = 'some data'
+        uri = 'test://test_rolling_back_session_does_not_store_file.txt'
+        data = 'test data'
 
-        file = TestFile()
-        file.storage_uri = file_storage_uri
-        file.data = data
+        storage.write(uri, data)
+        Session.rollback()
 
+        self.assertIsNone(storage.read(uri))
+        self.assertIsNone(self._get_from_filesystem(uri))
+
+
+
+    def test_setting_data_to_none_deletes_file(self):
+
+        uri = 'test://test_setting_data_to_none_deletes_file.txt'
+        data = 'test data'
+
+        storage.write(uri, data)
         transaction.commit()
 
-        self.assertIsNone(self._get_from_database(storage_uri=file_storage_uri))
-        self.assertIsNone(self._get_from_filesystem(storage_uri=file_storage_uri))
-        #}}}
+        self.assertEqual(storage.read(uri), data)
+        self.assertEqual(self._get_from_filesystem(uri), data)
 
-
-    def test_setting_data_to_none_deletes_it_from_storage(self):
-        #{{{
-
-        file_storage_uri = 'test://test_setting_data_to_none_deletes_it_from_storage.txt'
-        data = 'some data'
-
-        file = TestFile()
-        file.storage_uri = file_storage_uri
-        file.data = data
-
-        Session.add(file)
+        storage.write(uri, None)
         transaction.commit()
 
-        Session.add(file)
-        file.data = None
-
-        transaction.commit()
-
-        Session.add(file)
-        self.assertIsNone(file.data)
-        self.assertIsNone(self._get_from_filesystem(storage_uri=file_storage_uri))
-        #}}}
-
-
-
-    def test_setting_data_before_uri_works(self):
-        #{{{
-
-        file_storage_uri = 'test://test_setting_data_before_uri_works.txt'
-        data = 'some data'
-
-        file = TestFile()
-        file.data = data
-        file.storage_uri = file_storage_uri
-        file.foo = file_storage_uri
-
-        Session.add(file)
-        transaction.commit()
-
-        Session.add(file._storable_file)
-
-        self.assertEqual(self._get_from_database(storage_uri=file_storage_uri), file._storable_file)
-        self.assertEqual(self._get_from_filesystem(storage_uri=file_storage_uri), data)
-        #}}}
-
+        self.assertIsNone(storage.read(uri))
+        self.assertIsNone(self._get_from_filesystem(uri))
 
 
