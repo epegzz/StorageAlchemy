@@ -3,14 +3,15 @@ from unittest import TestCase
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.ext.declarative import declarative_base
+import sqlahelper
 
 meta = MetaData()
-#engine = create_engine('mysql://test:test@localhost:3306/test?charset=utf8&use_unicode=0')
-engine = create_engine('sqlite:///:memory:', echo=True)
+engine = create_engine('mysql://test:test@localhost:3306/test?charset=utf8&use_unicode=0')
 Base = declarative_base(metadata = meta)
 Base.metadata.bind = engine
+sqlahelper.add_engine(engine)
 
-session = scoped_session(sessionmaker(bind=engine))()
+Session = scoped_session(sessionmaker(bind=engine))
 
 database_created = False
 

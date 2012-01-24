@@ -4,8 +4,8 @@ from distutils.core import setup
 
 setup(
     name='StorageAlchemy',
-    version='0.2',
-    description='Feels like storing file contents in the database, but actually stores them wherever you like to. Combines the power of transactional database queries with the freedom of storing data using whatever external API you like.',
+    version='0.3',
+    description='Use sqlalchemy to commit/rollback changes to files on the filesystem or any other external storage.',
     url='http://github.com/epegzz/StorageAlchemy',
 
     author='Daniel Schäfer',

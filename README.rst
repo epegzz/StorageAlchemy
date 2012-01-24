@@ -1,6 +1,4 @@
 
-.. automodule:: storagealchemy
-
 StorageAlchemy
 **************
 
@@ -76,16 +74,5 @@ must inherit from :class:`Storable`. Here is some little real life example::
     # done ;)
 
 
-
-
-API
-===
-
-.. automodule:: storagealchemy
-.. autoclass:: Storage
-    :members: add_handler
-
-.. automodule:: storagealchemy.handler
-.. autoclass:: FilesystemHandler
 
 

@@ -4,7 +4,6 @@ import logging
 import sqlalchemy as sa
 import hashlib
 
-#from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.schema import Index
 from sqlalchemy.orm import mapper, object_session
 from sqlalchemy.orm.util import has_identity
@@ -28,9 +27,14 @@ class Storage():
     def __init__(self):
         self._storage_dict = dict()
         self._tasks = dict()
+        self._unbound = list()
         self._committed = list()
         self._uriless_stash_dict = dict()
         Storable._storage = self
+
+        # create database tables if necessary
+        StorableClass.__table__.create(checkfirst=True)
+        StorableFile.__table__.create(checkfirst=True)
 
         def after_bulk_delete(session, query, query_context, result):
             # @TODO: implement later
@@ -40,11 +44,12 @@ class Storage():
             # [Table('TestFile', MetaData(bind=Engine(mysql://...)), Column('id', BigInteger(), table=<TestFile>, primary_key=True, nullable=False), Column('foo', Text(length=32), table=<TestFile>), schema=None)]
             pass
 
-        sa.event.listen(Session, "after_bulk_delete", after_bulk_delete)
-        sa.event.listen(Session, "before_flush", self._before_flush_callback())
-        sa.event.listen(Session, "before_commit", self._before_commit_callback())
-        sa.event.listen(Session, "after_commit", self._after_commit_callback())
-        sa.event.listen(Session, "after_soft_rollback", self._after_rollback_callback())
+        sa.event.listen(Session(), "after_bulk_delete", after_bulk_delete)
+        sa.event.listen(Session(), "before_flush", self._before_flush_callback())
+        sa.event.listen(Session(), "after_flush_postexec", self._after_flush_callback())
+        sa.event.listen(Session(), "before_commit", self._before_commit_callback())
+        sa.event.listen(Session(), "after_commit", self._after_commit_callback())
+        sa.event.listen(Session(), "after_soft_rollback", self._after_rollback_callback())
 
         def on_storage_file_init(bind, *args, **kwargs):
             bind.on_create_new_instance()
@@ -141,18 +146,32 @@ class Storage():
 
     def _before_flush_callback(self):
         def _before_flush(session, flush_context, instances):#{{{
-            print "before flush callback"
+            log.debug("*** before flush callback")
+            log.debug("session.new: %s" % session.new)
+            log.debug("session.dirty: %s" % session.dirty)
+            log.debug("session.deleted: %s" % session.deleted)
+
             # Make sure that _storable_file of all storables in session
             # is in session as well.
             for obj in session:
-                if isinstance(obj, Storable):
-                    if obj._storable_file not in session:
+
+                if isinstance(obj, Storable) and obj not in session.deleted:
+                    if obj.id is not None:
+                        log.debug("> add storable_file: %s" % obj._storable_file.storage_uri)
                         session.add(obj._storable_file)
+                    else:
+                        # obj has no id yet. we have to let this flush
+                        # go my first so that obj gets inserted into database
+                        # and receives an id. After flush we can set the id on
+                        # obj._storable_file and add it to session as well.
+                        log.debug("> bind after flush: %s" % obj._storable_file)
+                        self._unbound.append(obj._storable_file)
             # Make sure that if _storable_file.bind is not in session
             # _storable_file is not in session either.
             for storable_file in self._tasks:
                 if storable_file.bind not in session\
                 and storable_file in session:
+                    log.debug("> expunging storage_file: %s (bind not in session)" % storable_file)
                     session.expunge(storable_file)
             # Make sure that if _storable_file.bind gets deleted,
             # _storable_file gets deleted as well.
@@ -161,14 +180,28 @@ class Storage():
                     # Delete all that got deleted from database
                     # after next commit.
                     self.delete_on_commit(obj._storable_file)
+                    log.debug("> delete obj._storable_file: %s" % obj)
                     Session.delete(obj._storable_file)
         return _before_flush
         #}}}
 
 
+    def _after_flush_callback(self):
+        def _after_flush(session, flush_context):#{{{
+            log.debug("*** after flush callback")
+            for storable_file in self._unbound:
+                log.debug("> binding obj: %s to %s" % (storable_file, storable_file.bind))
+                Session.add(storable_file.bind)
+                storable_file.bind_id = storable_file.bind.id
+                Session.add(storable_file)
+            self._unbound = list()
+        return _after_flush
+        #}}}
+
+
     def _before_commit_callback(self):
         def _before_commit(session):#{{{
-            print "before commit callback"
+            log.debug("*** before commit callback")
             # perform write/delete action
             for storable_file in self._tasks:
                 if storable_file in session:
@@ -178,8 +211,9 @@ class Storage():
 
     def _after_commit_callback(self):
         def _after_commit(session):#{{{
-            print "after commit callback"
+            log.debug("*** after commit callback")
             # perform write/delete action
+            drop_tasks = list()
             for storable_file in self._tasks:
                 if storable_file in self._committed:
                     for storage_uri in self._tasks[storable_file]:
@@ -189,7 +223,9 @@ class Storage():
                         elif 'write' in tasks:
                             tasks['write']['callback'](session, storage_uri)
                     self._committed.remove(storable_file)
-                    self._drop_tasks(storable_file)
+                    drop_tasks.append(storable_file)
+            for storable_file in drop_tasks:
+                self._drop_tasks(storable_file)
         return _after_commit
         #}}}
 
@@ -321,6 +357,8 @@ class Storage():
 
 class StorableClass(Base):
     __tablename__ = 'StorableClass'
+    __table_args__ = {'mysql_engine':'InnoDB', 'mysql_charset':'utf8'}
+
     id                = sa.Column(sa.BigInteger(20, unsigned=True), primary_key=True, autoincrement=True)
     tablename         = sa.Column(sa.String(length=255), index=True, unique=True )
 
@@ -345,43 +383,51 @@ class StorableFile(Base):
 class Storable(object):
 
     def on_create_new_instance(self):
-        print 'on_create_new_instance'
         self._set_storable_class()
         self._storable_file = StorableFile()
-        self._storable_file.bind_class_id = self._storable_class.id
+        self._storable_file.bind_class_id = self._storable_class_id
         self._storable_file.bind = self
+        log.debug("> created new Storable instance: %s" % self)
+        log.debug("> created new StorableFile instance: %s" % self._storable_file)
 
     @sa.orm.reconstructor
     def on_load_from_session(self):
-        print 'on_load_from_session'
         self._set_storable_class()
         try:
             self._storable_file = Session\
                 .query(StorableFile)\
-                .filter_by(bind_class_id = self._storable_class.id)\
+                .filter_by(bind_class_id = self._storable_class_id)\
                 .filter_by(bind_id = self.id)\
                 .one()
+            self._storable_file.bind = self
+            log.debug("> loaded existing Storable instance: %s" % self)
+            log.debug("> loaded existing StorableFile instance: %s" % self._storable_file)
         except sa.orm.exc.NoResultFound:
             self._storable_file = StorableFile()
-            self._storable_file.bind_class_id = self._storable_class.id
+            self._storable_file.bind_class_id = self._storable_class_id
+            self._storable_file.bind_id = self.id
+            self._storable_file.bind = self
+            Session.add(self._storable_file)
+            log.debug("> loaded existing Storable instance: %s" % self)
+            log.debug("> created new StorableFile instance: %s" % self._storable_file)
 
 
     def _set_storable_class(self):
-        if not hasattr(self.__class__, '__storable_class__'):
+        if not hasattr(self.__class__, '__storable_class_id__'):
             try:
-                self.__class__.__storable_class__ = Session\
-                    .query(StorableClass)\
+                self.__class__.__storable_class_id__ = Session\
+                    .query(StorableClass.id)\
                     .filter_by(tablename = self.__tablename__)\
-                    .one()
-                print 'loaded storable class from database: %s' % self.__tablename__
+                    .scalar()
+                log.debug("> loaded existing StorableClass: %s" % self.__tablename__)
             except sa.orm.exc.NoResultFound:
-                print 'created new storable class: %s' % self.__tablename__
+                log.debug("> created new StorableClass: %s" % self.__tablename__)
                 storable_class = StorableClass()
                 storable_class.tablename = self.__tablename__
                 Session.add(storable_class)
                 Session.flush()
-                self.__class__.__storable_class__ = storable_class
-        self._storable_class = self.__class__.__storable_class__
+                self.__class__.__storable_class_id__ = storable_class.id
+        self._storable_class_id = self.__class__.__storable_class_id__
 
 
     def _get_file_contents(self):
