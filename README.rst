@@ -39,7 +39,7 @@ Using StorageAlchemy
 ====================
 
 In order to allow StorageAlchemy to handle a python object, the object
-must inherit from :class:`Storable`. Here is some little real life example::
+must inherit from `Storable`. Here is some little real life example::
 
     from storagealchemy import Storable
 
