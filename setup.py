@@ -4,7 +4,7 @@ from distutils.core import setup
 
 setup(
     name='StorageAlchemy',
-    version='0.3',
+    version='0.4',
     description='Use sqlalchemy to commit/rollback changes to files on the filesystem or any other external storage.',
     url='http://github.com/epegzz/StorageAlchemy',
 
