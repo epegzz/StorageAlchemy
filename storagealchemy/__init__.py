@@ -68,6 +68,35 @@ class Storage():
             self._write_on_commit(uri, data)
         #}}}
 
+    def delete(self, uri):
+        #{{{
+        """Deletes an uri.
+
+        """
+        self._delete_on_commit(uri)
+        #}}}
+
+
+    def list(self, uri_path):
+        """Returns a list of all uris within a given path.
+
+        """
+        storage, path = self._get_storage(uri_path, 'r')
+        result = set()
+        for file in storage.list(path):
+            result.add(file)
+
+        for uri in self._tasks:
+            if uri.startswith(uri_path):
+                _uri = uri.replace(uri_path,'')
+                if _uri.startswith('/'):
+                    _uri = uri[1:]
+                if len(_uri.split('/')) == 1:
+                    if 'delete' not in self._tasks[uri]:
+                        result.add(_uri)
+                    elif _uri in result:
+                        result.remove(_uri)
+        return sorted(result)
 
 
     def _write_on_commit(self, uri, data):#{{{

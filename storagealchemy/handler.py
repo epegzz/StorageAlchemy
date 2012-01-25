@@ -30,6 +30,14 @@ class FilesystemHandler(object):
         return os.path.isfile(os.path.join(self.storage_path, path))
 
 
+    def list(self, path):
+        real_path = os.path.join(self.storage_path, path)
+        if os.path.isdir(real_path):
+            for x in os.listdir(real_path):
+                if os.path.isfile(os.path.join(self.storage_path, path, x)):
+                    yield x
+
+
     def read(self, path, **kwargs):#{{{
         if path.startswith('/'):
             path = path[1:]
@@ -147,6 +155,9 @@ class DevNullStorage(object):
 
     def has(self, path):
         return False
+
+    def list(self, path):
+        return []
 
     def read(self, path, **kwargs):
         return None

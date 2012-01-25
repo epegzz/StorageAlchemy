@@ -64,7 +64,7 @@ class StorageTest(BaseTestCase):
 
     def test_rolling_back_session_does_not_store_file(self):
 
-        uri = 'test://test_rolling_back_session_does_not_store_file.txt'
+        uri = 'test://test_rolling_back_session_does_not_store_file'
         data = 'test data'
 
         storage.write(uri, data)
@@ -77,7 +77,7 @@ class StorageTest(BaseTestCase):
 
     def test_setting_data_to_none_deletes_file(self):
 
-        uri = 'test://test_setting_data_to_none_deletes_file.txt'
+        uri = 'test://test_setting_data_to_none_deletes_file'
         data = 'test data'
 
         storage.write(uri, data)
@@ -91,5 +91,46 @@ class StorageTest(BaseTestCase):
 
         self.assertIsNone(storage.read(uri))
         self.assertIsNone(self._get_from_filesystem(uri))
+
+
+    def test_list_uncommitted_file_shows_up_as_result(self):
+
+        uri = 'test://test_list_uncommitted_file_shows_up_as_result'
+        data = 'test data'
+
+        storage.write(uri, data)
+
+        self.assertIn('test_list_uncommitted_file_shows_up_as_result', storage.list('test://'))
+
+
+
+    def test_list_committed_file_shows_up_as_result(self):
+
+        uri = 'test://test_list_committed_file_shows_up_as_result'
+        data = 'test data'
+
+        storage.write(uri, data)
+        transaction.commit()
+
+        self.assertIn('test_list_committed_file_shows_up_as_result', storage.list('test://'))
+
+
+    def test_list_subdirectory_does_not_show_up_in_result(self):
+
+        storage.write('test://ab', 'ab')
+        storage.write('test://a/b', 'a/b')
+        storage.write('test://a/a/b', 'a/a/b')
+
+        self.assertIn('b', storage.list('test://a/'))
+        self.assertEqual(1, len(storage.list('test://a/')))
+
+
+    def test_list_deleted_file_does_not_show_up_in_result(self):
+
+        storage.write('test://list/deleted_uncommited', 'abc')
+        transaction.commit()
+        storage.delete('test://list/deleted_uncommited')
+
+        self.assertNotIn('deleted_uncommited', storage.list('test://list/'))
 
 
